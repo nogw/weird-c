@@ -36,8 +36,10 @@ void print_val(val_t *val) {
   switch (val->tag) {
   case CLOSURE_T:
     printf("<#closure>\n");
+    break;
   case INT_T:
     printf("%d\n", val->c.integer);
+    break;
   default:
     return;
   }

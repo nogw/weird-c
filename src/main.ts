@@ -1,4 +1,5 @@
-import { promises as fs } from "fs";
+import { promisify } from "util";
+import { promises } from "fs";
 import { exec } from "child_process";
 import path from "path";
 
@@ -49,16 +50,25 @@ type Token = ADT<{
 }>;
 
 const scanner = (source: string): Token[] => {
-  const keywords = new Map<string, Token>([
+  // God Forgive Me for My Sins
+  const reserved = new Map<string, Token>([
     ["fun", { tag: "FUN" }],
     ["let", { tag: "LET" }],
   ]);
 
   const tokens: Token[] = [];
 
-  const isDigit = (char: string) => char >= "0" && char <= "9";
-  const isAlpha = (char: string) => (char >= "a" && char <= "z") || (char >= "A" && char <= "Z") || char === "_";
-  const isAlphaNumeric = (char: string) => isAlpha(char) || isDigit(char);
+  const isDigit = (char: string) => {
+    return char >= "0" && char <= "9";
+  };
+
+  const isAlpha = (char: string) => {
+    return (char >= "a" && char <= "z") || (char >= "A" && char <= "Z") || char === "_";
+  };
+
+  const isAlphaNumeric = (char: string) => {
+    return isAlpha(char) || isDigit(char);
+  };
 
   const scanTokens = () => {
     let start_pos = 0;
@@ -96,7 +106,7 @@ const scanner = (source: string): Token[] => {
       }
 
       const value = source.substring(start_pos, current_pos);
-      const token = keywords.get(value);
+      const token = reserved.get(value);
 
       if (token === undefined) {
         tokens.push({ tag: "SYMBOL", value });
@@ -158,30 +168,23 @@ const scanner = (source: string): Token[] => {
   return scanTokens();
 };
 
-// Parser
-
 const parser = (initial: Token[]): Tree => {
-  let tokens = initial;
-  let current = 0;
+  const tokens = initial.slice();
 
   const fail = () => {
     const token = peek();
     throw new Error(`Unexpected token ${token}`);
   };
 
-  const isAtEnd = (): boolean => {
-    return peek().tag == "EOF";
+  const isToken = <T extends Token["tag"]>(tag: T): ((token: Token) => token is Extract<Token, { tag: T }>) => {
+    return (token): token is Extract<Token, { tag: T }> => token.tag === tag;
   };
 
-  const check = (token: Token): boolean => {
-    if (isAtEnd()) {
-      return false;
-    }
-
-    return peek().tag === token.tag;
+  const check = (tag: Token["tag"]) => {
+    return !isAtEnd() && isToken(tag)(peek());
   };
 
-  const matchToken = (...tokens: Token[]): boolean => {
+  const matchToken = (...tokens: Token["tag"][]): boolean => {
     for (let i = 0; i < tokens.length; i++) {
       if (check(tokens[i])) {
         advance();
@@ -190,6 +193,33 @@ const parser = (initial: Token[]): Tree => {
     }
 
     return false;
+  };
+
+  const consume = <T>(expect: (_: Token) => T) => {
+    const currentToken = peek();
+    const expectedValue = expect(currentToken);
+
+    if (!expectedValue) {
+      const msg = `Parser error with ${currentToken.tag}`;
+      throw new Error(msg);
+    }
+
+    advance();
+    return expectedValue;
+  };
+
+  const consumeToken = <T extends Token["tag"], R>(tag: T, callback?: (value: Extract<Token, { tag: T }>) => R): R => {
+    return consume((token) => {
+      if (!isToken(tag)(token)) {
+        throw new Error(`Expected token with tag "${tag}", but got "${token.tag}"`);
+      }
+
+      return callback ? callback(token) : (token as unknown as R);
+    });
+  };
+
+  const isAtEnd = () => {
+    return peek().tag == "EOF";
   };
 
   const advance = (): Token => {
@@ -220,39 +250,12 @@ const parser = (initial: Token[]): Tree => {
     return token;
   };
 
-  const isToken = <T extends Token["tag"]>(tag: T): ((token: Token) => token is Extract<Token, { tag: T }>) => {
-    return (token): token is Extract<Token, { tag: T }> => token.tag === tag;
-  };
-
-  const consume = <T>(expect: (_: Token) => T) => {
-    const currentToken = peek();
-    const expectedValue = expect(currentToken);
-
-    if (!expectedValue) {
-      const msg = `Parser error with ${currentToken.tag}`;
-      throw new Error(msg);
-    }
-
-    advance();
-    return expectedValue;
-  };
-
-  const consumeToken = <T extends Token["tag"], R>(tag: T, callback?: (value: Extract<Token, { tag: T }>) => R): R => {
-    return consume((token) => {
-      if (!isToken(tag)(token)) {
-        throw new Error(`Expected token with tag "${tag}", but got "${token.tag}"`);
-      }
-
-      return callback ? callback(token) : (token as unknown as R);
-    });
-  };
-
   const parseNumber = (): Tree => {
-    return Num(consumeToken("NUMBER", (token) => token.value));
+    return consumeToken("NUMBER", (token) => Num(token.value));
   };
 
   const parseSymbol = (): Tree => {
-    return Var(consumeToken("SYMBOL", (token) => token.value));
+    return consumeToken("SYMBOL", (token) => Var(token.value));
   };
 
   const parseParens = (): Tree => {
@@ -261,21 +264,6 @@ const parser = (initial: Token[]): Tree => {
     consumeToken("RPAREN");
 
     return value;
-  };
-
-  const parseAtom = (): Tree => {
-    if (isToken("NUMBER")(peek())) return parseNumber();
-    if (isToken("SYMBOL")(peek())) return parseSymbol();
-    if (isToken("LPAREN")(peek())) return parseParens();
-
-    return fail();
-  };
-
-  const expression = (): Tree => {
-    if (matchToken({ tag: "LET" })) return parseLet();
-    if (matchToken({ tag: "FUN" })) return parseFun();
-
-    return parseApp();
   };
 
   const parseLet = (): Tree => {
@@ -296,10 +284,18 @@ const parser = (initial: Token[]): Tree => {
     return Lam(param, body);
   };
 
+  const parseAtom = (): Tree => {
+    if (isToken("NUMBER")(peek())) return parseNumber();
+    if (isToken("SYMBOL")(peek())) return parseSymbol();
+    if (isToken("LPAREN")(peek())) return parseParens();
+
+    return fail();
+  };
+
   const parseApp = (): Tree => {
     const func = parseAtom();
 
-    if (matchToken({ tag: "LPAREN" })) {
+    if (matchToken("LPAREN")) {
       return parseCall(func);
     }
 
@@ -312,16 +308,25 @@ const parser = (initial: Token[]): Tree => {
     while (true) {
       args.push(expression());
 
-      if (matchToken({ tag: "COMMA" })) {
+      if (matchToken("COMMA")) {
         continue;
       }
 
-      matchToken({ tag: "RPAREN" });
+      matchToken("RPAREN");
       break;
     }
 
     return args.reduce((fn, arg) => App(fn, arg), func);
   };
+
+  const expression = (): Tree => {
+    if (matchToken("LET")) return parseLet();
+    if (matchToken("FUN")) return parseFun();
+
+    return parseApp();
+  };
+
+  let current = 0;
 
   return expression();
 };
@@ -362,6 +367,23 @@ type Topl = ADT<{
 }>;
 
 type Prog = Topl[];
+
+const showE = (expr: Expr): string =>
+  match(expr)({
+    Num: ({ data }) => `Num ${data}`,
+    Ref: ({ data }) => `Ref ${data}`,
+    Idx: ({ data, idx }) => `Idx ${data} ${idx}`,
+    App: ({ func, argm }) => `App ${func} ${showE(argm)}`,
+    Cls: ({ prop, body }) => `Closure ${prop} [${body.map((x) => showE(x)).join(", ")}]`,
+    Let: ({ name, bind, body }) => `Let (${name},${showE(bind)}) (${showE(body)})`,
+  });
+
+const showD = (topl: Topl): string =>
+  match(topl)({
+    Decl: ({ free, name, env, prop, body }) => `CodeDec ${free} ${name} (${env},${prop}) (${showE(body)})`,
+    Main: ({ expr }) => `CodeMain (${showE(expr)})`,
+  });
+
 type Code = string;
 type Build = (_: string) => Code;
 
@@ -438,20 +460,21 @@ const convertLam = (state0: State, prop: Name, body: Tree): Converted => {
 
   const lam = Lam(prop, body);
   const fvs = Array.from(free(lam));
+
   const env = `env${i}`;
   const cls = `cls${j}`;
   const sub = makeContext(fvs.map((varName, idx) => [varName, EIdx(env, idx)]));
 
-  const [xs, [res, state3]] = convert(state2, body);
-  const [bd, newIndexes] = [substitute(sub, res), state3];
+  const [progBody, [bd, is]] = convert(state2, body);
+  const [exprBody, newState] = [substitute(sub, bd), is];
 
-  const code = TDecl(fvs.length, cls, env, prop, bd);
+  const code = TDecl(fvs.length, cls, env, prop, exprBody);
   const refs = fvs.map((fv) => ERef(fv));
   const clos = ECls(cls, refs);
 
   return [
-    [...xs, code],
-    [clos, newIndexes],
+    [...progBody, code],
+    [clos, newState],
   ];
 };
 
@@ -488,13 +511,6 @@ const convert = (state: State, tree: Tree): Converted =>
 const convertCls = (tree: Tree): Prog => {
   const [decs, [code, _]] = convert(makeState(), tree);
   return [...decs, TMain(code)];
-};
-
-const indent = (str: string): string => {
-  return str
-    .split("\n")
-    .map((line) => "  " + line)
-    .join("\n");
 };
 
 const bindReturn = (bind: Name): Build => {
@@ -541,7 +557,7 @@ const codegenLet = (build: Build, name: Name, bind: Expr, body: Expr): Code => {
 };
 
 const codegenCls = (build: Build, prop: Prop, body: Expr[]): Code => {
-  const code = body.map((expr) => codegenExpr(build, expr));
+  const code = body.map((expr) => codegenExpr(sameReturn, expr));
   const cont = code.join(", ");
 
   return build(`build_cls(${prop}, (struct val *[${body.length}]){ ${cont} })`);
@@ -559,6 +575,13 @@ const codegenMain = (body: Expr): Code => {
   const expr = ["int main(void) {", indent(code), "}"];
 
   return expr.join("\n");
+};
+
+const indent = (str: string): string => {
+  return str
+    .split("\n")
+    .map((line) => "  " + line)
+    .join("\n");
 };
 
 const codegenExpr = (build: Build, expr: Expr): Code =>
@@ -590,19 +613,20 @@ const writeOutput = async (outPath: string, code: string) => {
   const dirPath = path.dirname(fileExt);
 
   try {
-    await fs.access(dirPath);
+    await promises.access(dirPath);
   } catch (error) {
-    await fs.mkdir(dirPath, { recursive: true });
+    await promises.mkdir(dirPath, { recursive: true });
   }
 
-  await fs.writeFile(fileExt, code);
+  await promises.writeFile(fileExt, code);
 };
 
+const promiseExec = promisify(exec);
 const compileMain = async (outPath: string) => {
   const command = `gcc -o ${outPath} ${outPath}.c`;
 
   try {
-    const { stdout } = await exec(command);
+    const { stdout } = await promiseExec(command);
     console.log(`C file (${outPath}) compiled successfully: ${stdout}`);
   } catch (error) {
     console.error(`Error compiling C file: ${error}`);
@@ -613,6 +637,7 @@ const compileMain = async (outPath: string) => {
 const driver = async (source: string) => {
   const scan = scanner(source);
   const prog = parser(scan);
+
   const conv = convertCls(prog);
   const code = codegenProg(conv);
 
@@ -629,10 +654,33 @@ const driver = async (source: string) => {
 };
 
 (async () => {
+  // let id = fun x => x;
+  // let fx = fun f => fun x => f(x);
+  // fx(id, 5)
+
+  // let fx = fun x => x;
+  // let id = fun y => y;
+  // let yx = id(fx);
+  // yx(10)
+
+  // let fx = fun x => x;
+  // let id = fun y => fun z => z;
+  // id(10, fx)
+
+  // let fx = fun f => fun x => f; fx(10)
+  // let dup = fun x => fun y => y; dup
+
   // todo: fix env
+  // todo: not work (segfault):
+  // let tru = fun x => fun y => x;
+  // let fal = fun x => fun y => y;
+  // let if_ = fun p => fun t => fun f => p(t, f);
+  // if_(tru, 10, 20)
+
   await driver(`
-    let id = fun x => x;
-    let fx = fun f => fun x => x;
-    fx(id, 5) 
+    let fx = fun x => x;
+    let id = fun y => y;
+    let yx = id(fx);
+    yx(10)
   `);
 })();

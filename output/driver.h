@@ -16,6 +16,7 @@ typedef struct val {
 
 val_t *build_cls(val_t *(*code)(val_t **, val_t *), val_t **env);
 val_t *build_int(int val);
+
 void destroy_val(val_t *val);
 void print_val(val_t *val);
 
